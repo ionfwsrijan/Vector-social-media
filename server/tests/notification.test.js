@@ -13,7 +13,7 @@ describe("Notification Endpoints", () => {
     surname: "Tester",
     phoneNumber: "1234567890",
     email: "notify@test.com",
-    password: "password123",
+    password: "Password123",
     username: "notifytester",
     bio: "Test bio",
     description: "Test description",
@@ -36,20 +36,20 @@ describe("Notification Endpoints", () => {
       surname: "User",
       phoneNumber: "9999999999",
       email: "other@test.com",
-      password: "password123",
+      password: "Password123",
       username: "otheruser",
       bio: "Other bio",
       description: "Other description",
     });
 
-    const olderNotification = await Notification.create({
+    await Notification.create({
       recipient: user._id,
       sender: otherUser._id,
       type: "follow",
       isRead: false,
     });
 
-    const newerNotification = await Notification.create({
+    await Notification.create({
       recipient: user._id,
       sender: otherUser._id,
       type: "message",
@@ -68,8 +68,8 @@ describe("Notification Endpoints", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.body).toHaveLength(2);
-    expect(response.body[0]._id).toBe(newerNotification._id.toString());
-    expect(response.body[1]._id).toBe(olderNotification._id.toString());
+    expect(response.body[0].type).toBe("message");
+    expect(response.body[1].type).toBe("follow");
   });
 
   it("marks a notification as read", async () => {
@@ -138,7 +138,7 @@ describe("Notification Endpoints", () => {
       surname: "All",
       phoneNumber: "8888888888",
       email: "deleteall@test.com",
-      password: "password123",
+      password: "Password123",
       username: "deletealluser",
       bio: "Delete bio",
       description: "Delete description",

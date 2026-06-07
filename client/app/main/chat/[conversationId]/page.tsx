@@ -6,14 +6,17 @@ import axios from "axios";
 import { socket } from "@/socket/socket";
 import { useAppContext } from "@/context/AppContext";
 import { useRouter } from "next/navigation";
-import { Trash2, ArrowLeft, MoreHorizontal } from "lucide-react";
+import { Trash2, ArrowLeft, MoreHorizontal, ChevronDown, Check, CheckCheck } from "lucide-react";
 import ConfirmModal from "@/components/modals/DeleteWarning";
 import SkeletonLoader from "@/components/loaders/SkeletonLoader";
+import { toast } from "react-toastify";
 import type { Conversation, Message, UserSummary } from "@/lib/types";
 
 type Params = {
   conversationId: string;
 };
+
+type MessagesResponse = Message[] | { messages?: Message[]; hasMore?: boolean };
 
 export default function ChatPage({ params }: { params: Promise<Params> }) {
 
@@ -30,13 +33,35 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
   const [isLoadingMessages, setIsLoadingMessages] = useState(true);
 
   const [warningOpen, setWarningOpen] = useState(false);
+  const [deleteChatConfirmOpen, setDeleteChatConfirmOpen] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
+  const [hasMore, setHasMore] = useState(true);
+  const LIMIT = 50;
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [partnerTyping, setPartnerTyping] = useState(false);
+  const isTypingRef = useRef(false);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL!;
   const router = useRouter();
+
+  const normalizeMessagesResponse = (data: MessagesResponse) => {
+    if (Array.isArray(data)) {
+      return { messages: data, hasMore: data.length >= LIMIT };
+    }
+
+    return {
+      messages: Array.isArray(data?.messages) ? data.messages : [],
+      hasMore: Boolean(data?.hasMore),
+    };
+  };
 
   const formatTime = (date: string) => {
     return new Date(date).toLocaleTimeString("en-US", {
@@ -84,6 +109,14 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
         if (message.conversation !== conversationId) return prev;
         return [...prev, message];
       });
+
+      if (message.conversation === conversationId && message.sender._id !== userData.id) {
+        axios.patch(
+          `${BACKEND_URL}/api/messages/${conversationId}/read-all`,
+          {},
+          { withCredentials: true }
+        ).catch((err) => console.error("Failed to mark incoming message as read:", err));
+      }
     };
 
     const handleDelete = ({
@@ -110,16 +143,48 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
       }
 
     };
-
+    const handleTyping = ({ conversationId: cId }: { conversationId: string }) => {
+        if (cId === conversationId) setPartnerTyping(true);
+    };
+    const handleStopTyping = ({ conversationId: cId }: { conversationId: string }) => {
+        if (cId === conversationId) setPartnerTyping(false);
+    };
+    const handleConversationRead = ({
+      conversationId: convo,
+      readBy,
+    }: {
+      conversationId: string;
+      readBy: string;
+    }) => {
+      if (convo === conversationId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.sender._id !== readBy ? { ...m, isRead: true } : m
+          )
+        );
+      }
+    };
+    const handleConversationDeleted = (data: { conversationId: string }) => {
+        if (data.conversationId === conversationId) {
+            router.push("/main/chat");
+            toast.info("This conversation has been deleted");
+        }
+    };
     socket.on("receive_message", handleReceiveMessage);
     socket.on("message_deleted", handleDelete);
-
+    socket.on("typing", handleTyping);
+    socket.on("stop_typing", handleStopTyping);
+    socket.on("conversation_read", handleConversationRead);
+    socket.on("conversation:deleted", handleConversationDeleted);
     return () => {
-      socket.off("receive_message", handleReceiveMessage);
-      socket.off("message_deleted", handleDelete);
+        socket.off("receive_message", handleReceiveMessage);
+        socket.off("message_deleted", handleDelete);
+        socket.off("typing", handleTyping);
+        socket.off("stop_typing", handleStopTyping);
+        socket.off("conversation_read", handleConversationRead);
+        socket.off("conversation:deleted", handleConversationDeleted);
     };
-
-  }, [userData, conversationId]);
+  }, [userData, conversationId, BACKEND_URL]);
 
   // FETCH CHAT
   useEffect(() => {
@@ -144,12 +209,14 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
           setOtherUser(other);
         }
 
-        const msgRes = await axios.get<Message[]>(
-          `${BACKEND_URL}/api/messages/${conversationId}`,
+        const msgRes = await axios.get<MessagesResponse>(
+          `${BACKEND_URL}/api/messages/${conversationId}?limit=${LIMIT}`,
           { withCredentials: true }
         );
 
-        setMessages(msgRes.data);
+        const normalizedMessages = normalizeMessagesResponse(msgRes.data);
+        setMessages(normalizedMessages.messages);
+        setHasMore(normalizedMessages.hasMore);
 
         // Mark all messages as read
         try {
@@ -174,15 +241,103 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
 
   }, [BACKEND_URL, conversationId, userData]);
 
+  const loadMoreMessages = async () => {
+    if (!hasMore || isLoadingMore || messages.length === 0) return;
+    setIsLoadingMore(true);
+    try {
+      const oldest = messages[0];
+      const { data } = await axios.get<MessagesResponse>(
+        `${BACKEND_URL}/api/messages/${conversationId}?before=${oldest.createdAt}&limit=${LIMIT}`,
+        { withCredentials: true }
+      );
+      const normalizedMessages = normalizeMessagesResponse(data);
+      setMessages((prev) => [...normalizedMessages.messages, ...prev]);
+      setHasMore(normalizedMessages.hasMore);
+    } catch (error) {
+      console.error("Failed to load more messages", error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
   // AUTO SCROLL
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = chatContainerRef.current;
+
+    if (!container) return;
+
+    const threshold = 100;
+
+    const isNearBottom =
+      container.scrollHeight -
+        container.scrollTop -
+        container.clientHeight <
+      threshold;
+
+    if (isNearBottom) {
+      bottomRef.current?.scrollIntoView({
+        behavior: "smooth",
+      });
+    }
   }, [messages]);
+
+  useEffect(() => {
+    const container = chatContainerRef.current;
+
+    if (!container) return;
+
+    const handleScroll = () => {
+      const threshold = 100;
+
+      const isNearBottom =
+        container.scrollHeight -
+          container.scrollTop -
+          container.clientHeight <
+        threshold;
+
+      setShowScrollButton(!isNearBottom);
+    };
+
+    container.addEventListener("scroll", handleScroll);
+
+    handleScroll();
+
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+    };
+  }, []);
+
+  const scrollToBottom = () => {
+    bottomRef.current?.scrollIntoView({
+      behavior: "smooth",
+    });
+  };
+  const handleTypingInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+      setText(e.target.value);
+
+      if (!receiverId) return;
+
+      if (!isTypingRef.current) {
+          isTypingRef.current = true;
+          socket.emit("typing", { conversationId, receiverId });
+      }
+
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+
+      typingTimeoutRef.current = setTimeout(() => {
+          socket.emit("stop_typing", { conversationId, receiverId });
+          isTypingRef.current = false;
+      }, 2000);
+  };
+
+  const MESSAGE_MAX = 2000;
+  const isOverLimit = text.length > MESSAGE_MAX;
+  const isSendDisabled = isSending || !text.trim() || isOverLimit;
 
   // SEND MESSAGE
   const sendMessage = async () => {
 
-    if (!text.trim() || !receiverId || isSending) return;
+    if (isSendDisabled || !receiverId) return;
 
     setIsSending(true);
 
@@ -199,6 +354,9 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
       });
 
       setText("");
+      socket.emit("stop_typing", { conversationId, receiverId });
+      isTypingRef.current = false;
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     } catch (error) {
       console.error("Failed to send message:", error);
     } finally {
@@ -241,9 +399,25 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
     }
   };
 
-  return (
-    <div className="flex flex-col h-screen">
+  // DELETE FULL CHAT
+  const deleteChat = async () => {
+    try {
+      await axios.delete(
+        `${BACKEND_URL}/api/conversation/${conversationId}`,
+        { withCredentials: true }
+      );
+      toast.success("Chat cleared successfully");
+      router.push("/main/chat");
+    } catch (err) {
+      console.error("Failed to clear chat", err);
+      toast.error("Failed to clear chat");
+    } finally {
+      setDeleteChatConfirmOpen(false);
+    }
+  };
 
+  return (
+    <div className="flex h-screen flex-col overflow-hidden">
       <div className="chat-header px-14 md:px-5">
         <button
           onClick={() => router.push("/main/chat")}
@@ -255,44 +429,71 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
 
         <Image alt={otherUser?.name || "User avatar"} src={otherUser?.avatar || "/default-avatar.png"} width={48} height={48} className="h-12 w-12 rounded-full object-cover border ml-3" />
 
-        <p
+        <div
           onClick={() =>
             router.push(`/main/user/${otherUser?.username}`)
           }
-          className="ml-3 cursor-pointer text-[1.1rem] font-semibold text-foreground">
-          {otherUser?.name || "User"}
-        </p>
+          className="ml-3 min-w-0 cursor-pointer flex-1"
+        >
+          <p className="truncate text-[1.05rem] font-semibold text-foreground">
+            {otherUser?.name || "User"}
+          </p>
+          <p className="truncate text-sm surface-text-muted">
+            @{otherUser?.username || "vector"}
+          </p>
+        </div>
+
+        <button
+          onClick={() => setDeleteChatConfirmOpen(true)}
+          className="ml-auto rounded-full p-2 transition-colors text-red-500 hover:bg-accent/70"
+          title="Clear chat"
+        >
+          <Trash2 size={22} />
+        </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-3">
+      <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-5 flex flex-col gap-3">
 
         {isLoadingMessages ? (
           <div className="flex flex-col gap-4 w-full mt-2 px-2">
             <div className="flex justify-start">
-              <SkeletonLoader count={1} height="h-10" className="w-3/4 max-w-[220px] [&>div]:!rounded-2xl [&>div]:!rounded-bl-md" />
+              <SkeletonLoader count={1} height="h-10" className="w-3/4 max-w-55 [&>div]:rounded-2xl! [&>div]:rounded-bl-md!" />
             </div>
             <div className="flex justify-start">
-              <SkeletonLoader count={1} height="h-16" className="w-4/5 max-w-[280px] [&>div]:!rounded-2xl [&>div]:!rounded-bl-md" />
+              <SkeletonLoader count={1} height="h-16" className="w-4/5 max-w-70 [&>div]:rounded-2xl! [&>div]:rounded-bl-md!" />
             </div>
             <div className="flex justify-end">
-              <SkeletonLoader count={1} height="h-10" className="w-2/3 max-w-[240px] [&>div]:!rounded-2xl [&>div]:!rounded-br-md" />
+              <SkeletonLoader count={1} height="h-10" className="w-2/3 max-w-60 [&>div]:rounded-2xl! [&>div]:rounded-br-md!" />
             </div>
             <div className="flex justify-start">
-              <SkeletonLoader count={1} height="h-10" className="w-1/2 max-w-[160px] [&>div]:!rounded-2xl [&>div]:!rounded-bl-md" />
+              <SkeletonLoader count={1} height="h-10" className="w-1/2 max-w-40 [&>div]:rounded-2xl! [&>div]:rounded-bl-md!" />
             </div>
             <div className="flex justify-end">
-              <SkeletonLoader count={1} height="h-12" className="w-3/4 max-w-[260px] [&>div]:!rounded-2xl [&>div]:!rounded-br-md" />
+              <SkeletonLoader count={1} height="h-12" className="w-3/4 max-w-65 [&>div]:rounded-2xl! [&>div]:rounded-br-md!" />
             </div>
             <div className="flex justify-end">
-              <SkeletonLoader count={1} height="h-10" className="w-1/3 max-w-[140px] [&>div]:!rounded-2xl [&>div]:!rounded-br-md" />
+              <SkeletonLoader count={1} height="h-10" className="w-1/3 max-w-35 [&>div]:rounded-2xl! [&>div]:rounded-br-md!" />
             </div>
           </div>
         ) : messages.length === 0 ? (
-          <p className="surface-text-muted mt-4 text-center">
-            No messages
-          </p>
+          <div className="chat-empty-state">
+            <p className="text-base font-medium text-foreground">No messages yet</p>
+            <p className="mt-1 text-sm">Start the conversation with something thoughtful.</p>
+          </div>
         ) : (
-          messages.map((m, index) => {
+          <>
+            {hasMore && (
+              <div className="flex justify-center my-2">
+                <button
+                  onClick={loadMoreMessages}
+                  disabled={isLoadingMore}
+                  className="text-xs text-blue-500 hover:underline cursor-pointer disabled:opacity-50"
+                >
+                  {isLoadingMore ? "Loading..." : "Load previous messages"}
+                </button>
+              </div>
+            )}
+            {messages.map((m, index) => {
 
             const isMe = m.sender._id === userData?.id;
             const showDateSeparator =
@@ -353,7 +554,7 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
                     )}
 
                     <p
-                      className={`whitespace-pre-wrap wrap-break-word ${isMe && !m.isDeleted ? "pr-6" : ""
+                      className={`whitespace-pre-wrap wrap-break-word leading-relaxed ${isMe && !m.isDeleted ? "pr-6" : ""
                         }`}
                     >
                       {m.isDeleted ? (
@@ -364,8 +565,15 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
                         m.content
                       )}
 
-                      <span className="ml-2 text-[10px] opacity-70 relative top-0.5">
+                      <span className="ml-2 text-[10px] opacity-70 relative top-0.5 inline-flex items-center gap-0.5">
                         {formatTime(m.createdAt)}
+                        {isMe && !m.isDeleted && (
+                          m.isRead ? (
+                            <CheckCheck size={15} strokeWidth={2.5} className="text-green-400 ml-1 shrink-0" />
+                          ) : (
+                            <Check size={15} strokeWidth={2.5} className="text-white ml-1 shrink-0" />
+                          )
+                        )}
                       </span>
                     </p>
 
@@ -374,40 +582,67 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
                 </div>
               </div>
             );
-          }))
-        }
-
+          })}
+          </>
+        )}
+        {partnerTyping && (
+            <div className="flex items-center gap-2 px-3 py-1 text-sm surface-text-muted">
+                <span className="flex gap-0.5">
+                    <span className="animate-bounce">●</span>
+                    <span className="animate-bounce [animation-delay:0.1s]">●</span>
+                    <span className="animate-bounce [animation-delay:0.2s]">●</span>
+                </span>
+                <span>{otherUser?.name} is typing...</span>
+            </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
-      <div className="chat-composer">
+      <div className="flex flex-col">
+        {text.length > 0 && (
+          <div className={`px-5 pt-1 text-right text-xs ${isOverLimit ? "text-red-500 font-medium" : "text-muted-foreground"}`}>
+            {text.length} / {MESSAGE_MAX}
+            {isOverLimit && <span className="ml-2">Message too long</span>}
+          </div>
+        )}
 
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !isSending) {
-              e.preventDefault();
-              sendMessage();
-            }
-          }}
-          disabled={isSending}
-          className="chat-composer-input"
-          placeholder="Type a message..."
-        />
+        <div className="chat-composer">
 
-        <button
-          onClick={sendMessage}
-          disabled={isSending}
-          className={`text-white px-5 rounded-md transition-all ${isSending
-            ? "bg-blue-400 cursor-not-allowed opacity-60"
-            : "bg-blue-500 cursor-pointer hover:bg-blue-600"
-            }`}
-        >
-          {isSending ? "Sending..." : "Send"}
-        </button>
+          <input
+            value={text}
+            onChange={handleTypingInput}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !isSendDisabled) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+            maxLength={MESSAGE_MAX + 100}
+            disabled={isSending}
+            className={`chat-composer-input ${isOverLimit ? "border-red-500 focus:ring-red-500" : ""}`}
+            placeholder="Type a message..."
+            aria-label="Message input"
+          />
 
+          <button
+            onClick={sendMessage}
+            disabled={isSendDisabled}
+            className="chat-primary-button disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSending ? "Sending..." : "Send"}
+          </button>
+
+        </div>
       </div>
+
+      {showScrollButton && (
+        <button
+          onClick={scrollToBottom}
+          className="fixed bottom-24 right-6 z-50 rounded-full bg-black p-3 text-white shadow-lg transition hover:scale-105"
+        >
+          <ChevronDown size={20} />
+        </button>
+      )}
 
       <ConfirmModal
         open={warningOpen}
@@ -420,6 +655,15 @@ export default function ChatPage({ params }: { params: Promise<Params> }) {
         description="This message will be permanently deleted."
         confirmText="Delete"
         content={selectedMessage?.content}
+      />
+
+      <ConfirmModal
+        open={deleteChatConfirmOpen}
+        onClose={() => setDeleteChatConfirmOpen(false)}
+        onConfirm={deleteChat}
+        title="Clear this chat?"
+        description="Are you sure you want to clear this entire conversation? This action cannot be undone."
+        confirmText="Clear Chat"
       />
 
     </div>

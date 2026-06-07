@@ -1,9 +1,9 @@
 import Conversation from "../models/conversation.model.js";
 import Message from "../models/message.model.js";
 import User from "../models/user.model.js";
-
-export const createConversation = async (req, res) => {
-    try {
+import { getIO } from "../socket/socket.js";
+import asyncHandler from "../utils/asyncHandler.js";
+export const createConversation = asyncHandler(async (req, res) => {
         const { receiverId } = req.body;
         const senderId = req.user._id;
 
@@ -17,46 +17,205 @@ export const createConversation = async (req, res) => {
             return res.status(403).json({ message: "Action forbidden due to block status" });
         }
 
-        let convo = await Conversation.findOne({ participants: { $all: [senderId, receiverId] }, });
+        const participantsKey = [senderId.toString(), receiverId.toString()]
+            .sort()
+            .join(":");
+
+        let convo = await Conversation.findOne({ participantsKey });
+
+        // Backfill participantsKey for existing conversations (and return it)
         if (!convo) {
-            convo = await Conversation.create({ participants: [senderId, receiverId], });
+            convo = await Conversation.findOneAndUpdate(
+                { participants: { $all: [senderId, receiverId] }, participantsKey: { $exists: false } },
+                { $set: { participantsKey } },
+                { new: true }
+            );
+        }
+
+        // Re-verify block status right before creating
+        if (!convo) {
+            const [freshReceiver, freshSender] = await Promise.all([
+                User.findById(receiverId).select("blockedUsers"),
+                User.findById(senderId).select("blockedUsers"),
+            ]);
+            const stillBlocked = freshSender?.blockedUsers?.some(id => id.toString() === receiverId.toString()) ||
+                                freshReceiver?.blockedUsers?.some(id => id.toString() === senderId.toString());
+            if (stillBlocked) {
+                return res.status(403).json({ message: "Action forbidden due to block status" });
+            }
+        }
+
+        // Create atomically; if the unique index races, fall back to the existing one
+        if (!convo) {
+            try {
+                convo = await Conversation.findOneAndUpdate(
+                    { participantsKey },
+                    { $setOnInsert: { participants: [senderId, receiverId], participantsKey } },
+                    { upsert: true, new: true }
+                );
+            } catch (err) {
+                if (err?.code !== 11000) throw err;
+                convo = await Conversation.findOne({ participantsKey });
+            }
         }
         res.json(convo);
-    } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
-    }
-};
+});
 
-export const getConversation = async (req, res) => {
-    try {
-        const convo = await Conversation.findById(req.params.conversationId).populate("participants", "username name avatar");
+export const getConversation = asyncHandler(async (req, res) => {
+        const convo = await Conversation.findOne({
+            _id: req.params.conversationId,
+            participants: req.user._id,
+        }).populate("participants", "username name avatar");
+        if (!convo) {
+            return res.status(403).json({ message: "Conversation not found or unauthorized" });
+        }
+
+        const otherParticipant = convo.participants.find(
+            p => p._id.toString() !== req.user._id.toString()
+        );
+        if (otherParticipant) {
+            const otherUser = await User.findById(otherParticipant._id).select("blockedUsers");
+            const isBlocked = req.user.blockedUsers?.some(
+                id => id.toString() === otherParticipant._id.toString()
+            ) || otherUser?.blockedUsers?.some(
+                id => id.toString() === req.user._id.toString()
+            );
+            if (isBlocked) {
+                return res.status(403).json({ message: "Action forbidden due to block status" });
+            }
+        }
+
         res.json(convo);
-    } catch (error) {
-        res.status(500).json({
-            message: error.message
-        });
-    }
-};
+});
 
-export const getUserConversations = async (req, res) => {
-  try {
+export const getUserConversations = asyncHandler(async (req, res) => {
     const userId = req.user._id;
 
-    const conversations = await Conversation.aggregate([
-      // Match conversations for current user
-      { $match: { participants: userId } },
-      
+    let conversations = await Conversation.aggregate([
+      // Match conversations for current user that have not been soft-deleted by them
+      { $match: { participants: userId, deletedBy: { $ne: userId } } },
+
+      // Identify the other participant(s) in each conversation
+      {
+        $addFields: {
+          otherParticipants: {
+            $filter: {
+              input: "$participants",
+              as: "p",
+              cond: { $ne: ["$$p", userId] },
+            },
+          },
+        },
+      },
+
+      // Filter: exclude conversations where current user has blocked any other participant
+      {
+        $lookup: {
+          from: "users",
+          let: { userId: userId },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$userId"] } } },
+            { $project: { blockedUsers: 1 } },
+          ],
+          as: "currentUserDoc",
+        },
+      },
+      {
+        $match: {
+          $expr: {
+            $eq: [
+              {
+                $size: {
+                  $filter: {
+                    input: { $ifNull: [{ $arrayElemAt: ["$currentUserDoc.blockedUsers", 0] }, []] },
+                    as: "blockedId",
+                    cond: { $in: ["$$blockedId", "$otherParticipants"] },
+                  },
+                },
+              },
+              0,
+            ],
+          },
+        },
+      },
+
+      // Filter: exclude conversations where any other participant has blocked the current user
+      {
+        $lookup: {
+          from: "users",
+          let: { others: "$otherParticipants" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$_id", "$$others"] },
+                    { $in: [userId, { $ifNull: ["$blockedUsers", []] }] },
+                  ],
+                },
+              },
+            },
+            { $project: { _id: 1 } },
+          ],
+          as: "usersWhoBlockedMe",
+        },
+      },
+      { $match: { $expr: { $eq: [{ $size: "$usersWhoBlockedMe" }, 0] } } },
+
+      // Remove temporary block-check fields before the expensive lookups below
+      {
+        $project: {
+          currentUserDoc: 0,
+          otherParticipants: 0,
+          usersWhoBlockedMe: 0,
+        },
+      },
+
       // Lookup latest message
       {
         $lookup: {
           from: "messages",
           let: { conversationId: "$_id" },
           pipeline: [
-            { $match: { $expr: { $eq: ["$conversation", "$$conversationId"] } } },
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$conversation", "$$conversationId"] },
+                    { $eq: ["$isDeleted", false] },
+                  ],
+                },
+              },
+            },
             { $sort: { createdAt: -1 } },
-            { $limit: 1 }
+            { $limit: 1 },
+            {
+              $lookup: {
+                from: "users",
+                localField: "sender",
+                foreignField: "_id",
+                as: "sender"
+              }
+            },
+            {
+              $unwind: {
+                path: "$sender",
+                preserveNullAndEmptyArrays: true
+              }
+            },
+            {
+              $project: {
+                _id: 1,
+                conversation: 1,
+                sender: { _id: 1, username: 1, name: 1, avatar: 1 },
+                content: 1,
+                isDeleted: 1,
+                deletedAt: 1,
+                isRead: 1,
+                createdAt: 1,
+                updatedAt: 1
+              }
+            }
           ],
           as: "lastMessageArray"
         }
@@ -80,6 +239,7 @@ export const getUserConversations = async (req, res) => {
                 $expr: {
                   $and: [
                     { $eq: ["$conversation", "$$conversationId"] },
+                    { $eq: ["$isDeleted", false] },
                     { $eq: ["$isRead", false] },
                     { $ne: ["$sender", userId] }
                   ]
@@ -124,39 +284,100 @@ export const getUserConversations = async (req, res) => {
       { $sort: { updatedAt: -1 } }
     ]);
 
-    // Populate sender details in lastMessage
-    for (let convo of conversations) {
-      if (convo.lastMessage && convo.lastMessage.sender) {
-        const sender = await Message.findById(convo.lastMessage._id).populate(
-          "sender",
-          "username name avatar"
-        );
-        if (sender) convo.lastMessage.sender = sender.sender;
-      }
-    }
 
     res.json(conversations);
 
-  } catch (error) {
-    res.status(500).json({
-      message: error.message
-    });
-  }
-};
+});
 
-export const deleteConversation = async (req, res) => {
-    try {
-        const convo = await Conversation.findOneAndDelete({
+export const deleteConversation = asyncHandler(async (req, res) => {
+
+    const existingConvo = await Conversation.findOne({
+        _id: req.params.conversationId,
+        participants: req.user._id,
+    });
+
+    if (existingConvo) {
+        const otherParticipant = existingConvo.participants.find(
+            p => p.toString() !== req.user._id.toString()
+        );
+
+        if (otherParticipant) {
+            const otherUser = await User.findById(otherParticipant).select("blockedUsers");
+
+            const isBlocked =
+                req.user.blockedUsers?.some(
+                    id => id.toString() === otherParticipant.toString()
+                ) ||
+                otherUser?.blockedUsers?.some(
+                    id => id.toString() === req.user._id.toString()
+                );
+
+            if (isBlocked) {
+                return res.status(403).json({
+                    message: "Action forbidden due to block status"
+                });
+            }
+        }
+    }
+
+    const convo = await Conversation.findOneAndUpdate(
+        {
             _id: req.params.conversationId,
-            participants: req.user._id
+            participants: req.user._id,
+            deletedBy: { $ne: req.user._id },
+        },
+        { $addToSet: { deletedBy: req.user._id } },
+        { new: true }
+    );
+
+    if (!convo) {
+        const existingConvo = await Conversation.findOne({
+            _id: req.params.conversationId,
+            participants: req.user._id,
         });
 
-        if (!convo) {
-            return res.status(404).json({ message: "Conversation not found or unauthorized" });
+        if (!existingConvo) {
+            return res.status(404).json({
+                message: "Conversation not found or unauthorized"
+            });
         }
 
-        res.json({ message: "Conversation deleted successfully" });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(400).json({
+            message: "Conversation already deleted"
+        });
     }
-};
+
+    const allDeleted = convo.participants.every((participantId) =>
+        convo.deletedBy.some(
+            (id) => id.toString() === participantId.toString()
+        )
+    );
+
+    if (allDeleted) {
+        await Message.deleteMany({ conversation: convo._id });
+        await Conversation.deleteOne({ _id: convo._id });
+
+        getIO().to(convo._id.toString()).emit("conversation:deleted", {
+            conversationId: convo._id,
+        });
+    } else {
+        const otherParticipants = convo.participants.filter(
+            (pid) => pid.toString() !== req.user._id.toString()
+        );
+
+        otherParticipants.forEach((pid) => {
+            getIO().to(pid.toString()).emit(
+                "conversation:participant_deleted",
+                {
+                    conversationId: convo._id,
+                    deletedBy: req.user._id,
+                }
+            );
+        });
+    }
+
+    res.json({
+        message: "Conversation deleted successfully"
+    });
+
+});

@@ -52,7 +52,7 @@ type AppContextType = {
   refreshAuth: () => Promise<void>;
 };
 
-const AppContext = createContext<AppContextType | undefined>(
+export const AppContext = createContext<AppContextType | undefined>(
   undefined
 );
 
@@ -108,7 +108,119 @@ export function AppContextProvider({
       return;
     }
     socket.connect();
+
+    const onConnect = () => {
+      socket.emit("register", userData.id);
+    };
+
+    const onBlocked = (data: { blockedUserId: string; blockerId: string }) => {
+      setUserData((prev) => {
+        if (!prev) return prev;
+        const blocked = data.blockedUserId;
+        const iInitiated = data.blockerId === prev._id;
+        return {
+          ...prev,
+          blockedUsers: iInitiated
+            ? prev.blockedUsers
+              ? [...prev.blockedUsers, blocked]
+              : [blocked]
+            : prev.blockedUsers ?? [],
+          following: prev.following
+            ? prev.following.filter((id) => id !== blocked)
+            : [],
+          followers: prev.followers
+            ? prev.followers.filter((id) => id !== blocked)
+            : [],
+        };
+      });
+    };
+
+    const onUnblocked = (data: { unblockedUserId: string; blockerId: string }) => {
+      setUserData((prev) => {
+        if (!prev) return prev;
+        if (data.blockerId !== prev._id) return prev;
+        return {
+          ...prev,
+          blockedUsers: prev.blockedUsers
+            ? prev.blockedUsers.filter((id) => id !== data.unblockedUserId)
+            : [],
+        };
+      });
+    };
+
+    const onBookmarksInvalidated = (data: { userId: string }) => {
+      setPosts((prev) => prev.filter((p) => {
+        const authorId = typeof p.author === "string" ? p.author : p.author?._id;
+        return authorId !== data.userId;
+      }));
+    };
+
+    const onBlockLikesCleaned = (data: { targetUserId: string; postIds?: string[] }) => {
+      if (!data?.targetUserId) return;
+
+      setPosts((prev) =>
+        prev.map((p) => {
+          if (data.postIds?.length && !data.postIds.includes(p._id)) return p;
+
+          const nextLikes = p.likes.filter((like) => {
+            const likeUserId = typeof like === "string" ? like : like._id;
+            return likeUserId !== data.targetUserId;
+          });
+
+          return nextLikes.length === p.likes.length ? p : { ...p, likes: nextLikes };
+        })
+      );
+    };
+
+    const onBlockCommentsCleaned = (data: {
+      targetUserId: string;
+      commentRemovals: Array<{ postId: string; count: number }>;
+    }) => {
+      if (!data?.commentRemovals?.length) return;
+
+      setPosts((prev) =>
+        prev.map((p) => {
+          const removal = data.commentRemovals.find((r) => r.postId === p._id);
+          if (!removal) return p;
+          return {
+            ...p,
+            commentsCount: Math.max(0, (p.commentsCount || 0) - removal.count),
+          };
+        })
+      );
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("user:blocked", onBlocked);
+    socket.on("user:unblocked", onUnblocked);
+    socket.on("bookmarks:invalidated", onBookmarksInvalidated);
+    socket.on("block:likes_cleaned", onBlockLikesCleaned);
+    const onConversationDeleted = (data: { conversationId: string }) => {
+      // Full deletion — both participants deleted
+      // The conversation no longer exists in the database
+    };
+
+    const onParticipantDeleted = (data: { conversationId: string; deletedBy: string }) => {
+      // Soft deletion — one participant deleted, conversation still exists
+    };
+
+    socket.on("block:comments_cleaned", onBlockCommentsCleaned);
+    socket.on("conversation:deleted", onConversationDeleted);
+    socket.on("conversation:participant_deleted", onParticipantDeleted);
+
     socket.emit("register", userData.id);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("user:blocked", onBlocked);
+      socket.off("user:unblocked", onUnblocked);
+      socket.off("bookmarks:invalidated", onBookmarksInvalidated);
+      socket.off("block:likes_cleaned", onBlockLikesCleaned);
+      socket.off("block:comments_cleaned", onBlockCommentsCleaned);
+      socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("conversation:participant_deleted", onParticipantDeleted);
+      socket.disconnect();
+    };
   }, [userData?.id]);
 
   return (

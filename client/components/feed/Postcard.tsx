@@ -3,7 +3,7 @@
 import { useAppContext } from "@/context/AppContext";
 import axios from "axios";
 import Image from "next/image";
-import { Bookmark, Heart, MessageCircle, HelpCircle, Hammer, Share2, MessagesSquare, MoreHorizontal, Trash2, Flag, Forward, Pencil } from "lucide-react";
+import { Bookmark, BookmarkCheck , Heart, MessageCircle, HelpCircle, Hammer, Share2, MessagesSquare, MoreHorizontal, Trash2, Flag, Forward, Pencil } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "react-toastify";
@@ -17,7 +17,7 @@ import SkeletonLoader from "@/components/loaders/SkeletonLoader";
 import Linkify from "../ui/Linkify";
 import Avatar from "../ui/Avatar";
 import EditPostModal from "../modals/EditPostModal";
-import Portal from "../ui/Portal";
+import Portal from "../ui/Portal"
 
 
 type PostCardProps = {
@@ -41,7 +41,21 @@ export default function PostCard({ post, setPost }: PostCardProps) {
     const [showReportModal, setShowReportModal] = useState(false);
     const [showLikesModal, setShowLikesModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
+    const [bookmarked, setBookmarked] = useState(post.isBookmarked ?? false);
+    const [bookmarkLoading, setBookmarkLoading] = useState(false);
+    const [localLikes, setLocalLikes] = useState<Post["likes"]>(post.likes);
     type PostLike = Post["likes"][number];
+    const currentUserLike =
+        userData?.id
+            ? {
+                _id: userData.id,
+                id: userData.id,
+                name: userData.name,
+                surname: userData.surname,
+                username: userData.username,
+                avatar: userData.avatar,
+            }
+            : null;
     const getLikeUserId = (like: PostLike) => {
         if (!like) return "";
         return typeof like === "string" ? like : like._id;
@@ -55,7 +69,7 @@ export default function PostCard({ post, setPost }: PostCardProps) {
                     .filter((entry): entry is [string, PostLike] => Boolean(entry[0]))
             ).values()
         );
-    const uniqueLikes = getUniqueLikes(post.likes);
+    const uniqueLikes = getUniqueLikes(localLikes);
     const likeCount = uniqueLikes.length;
 
     const isOwner = userData?.id === post?.author?._id;
@@ -98,6 +112,7 @@ export default function PostCard({ post, setPost }: PostCardProps) {
     }
 
     const handleLike = async () => {
+        const previousLikes = localLikes;
         try {
             // 🚨 guard: don't proceed if user id missing
             if (!userData?.id) {
@@ -112,9 +127,11 @@ export default function PostCard({ post, setPost }: PostCardProps) {
 
             const updatedLikes = isLiked
                 ? uniqueLikes.filter((like) => getLikeUserId(like) !== userData.id)
-                : getUniqueLikes([...uniqueLikes, userData.id]);
+                : getUniqueLikes([...uniqueLikes, currentUserLike ?? userData.id]);
 
             // ✅ update local state safely
+            setLocalLikes(updatedLikes);
+            
             if (setPost) {
                 setPost(prev =>
                     prev
@@ -134,14 +151,37 @@ export default function PostCard({ post, setPost }: PostCardProps) {
                 );
             }
 
-            // ✅ API call
-            await axios.put(
+            // ✅ API call — read response to reconcile optimistic state
+            const res = await axios.put<{ liked: boolean; likesCount: number }>(
                 `${BACKEND_URL}/api/posts/${post._id}/like`,
                 {},
                 { withCredentials: true }
             );
-        } catch {
-            toast.error("Failed to like post");
+            const { liked: serverLiked } = res.data;
+            if (serverLiked !== !isLiked) {
+                const correctedLikes = serverLiked
+                    ? getUniqueLikes([...uniqueLikes, currentUserLike ?? userData.id])
+                    : uniqueLikes.filter((like) => getLikeUserId(like) !== userData.id);
+                setLocalLikes(correctedLikes);
+                if (setPost) {
+                    setPost(prev => prev ? { ...prev, likes: correctedLikes } : prev);
+                } else {
+                    setPosts(prev => prev.map(p => p._id === post._id ? { ...p, likes: correctedLikes } : p));
+                }
+            }
+        } catch (error) {
+            // 🚨 revert optimistic update
+            setLocalLikes(previousLikes);
+            if (setPost) {
+                setPost(prev => prev ? { ...prev, likes: previousLikes } : prev);
+            } else {
+                setPosts(prev => prev.map(p => p._id === post._id ? { ...p, likes: previousLikes } : p));
+            }
+            if (axios.isAxiosError(error) && error.response?.status === 403) {
+                toast.error("Action blocked");
+            } else {
+                toast.error("Failed to like post");
+            }
         }
     };
 
@@ -208,6 +248,13 @@ export default function PostCard({ post, setPost }: PostCardProps) {
 
         return () => clearTimeout(timeoutId);
     }, [post.image]);
+    useEffect(() => {
+        setBookmarked(post.isBookmarked ?? false);
+    }, [post.isBookmarked]);
+    
+    useEffect(() => {
+        setLocalLikes(post.likes);
+    }, [post.likes]);
 
     // prevent crash if author missing
     if (!post?.author) return null;
@@ -229,21 +276,26 @@ export default function PostCard({ post, setPost }: PostCardProps) {
                 });
             } else {
                 await navigator.clipboard.writeText(postUrl);
-                toast.success("Post link copied to clipboard");
-            }
-
-            // Increment share count in DB
-            await axios.put(`${BACKEND_URL}/api/posts/${post._id}/share`, {}, { withCredentials: true });
+                // Increment share count in DB
+            await axios.put(
+                `${BACKEND_URL}/api/posts/${post._id}/share`,
+                {},
+                { withCredentials: true }
+            );
 
             // Update local state
             if (setPost) {
-                setPost((prev) => prev ? ({
-                    ...prev,
-                    sharesCount: (prev.sharesCount || 0) + 1,
-                }) : prev);
+                setPost((prev) =>
+                    prev
+                        ? {
+                            ...prev,
+                            sharesCount: (prev.sharesCount || 0) + 1,
+                        }
+                        : prev
+                );
             } else {
-                setPosts(prev =>
-                    prev.map(p =>
+                setPosts((prev) =>
+                    prev.map((p) =>
                         p._id === post._id
                             ? { ...p, sharesCount: (p.sharesCount || 0) + 1 }
                             : p
@@ -251,12 +303,60 @@ export default function PostCard({ post, setPost }: PostCardProps) {
                 );
             }
 
+                toast.success("Post link copied to clipboard");
+            }
+
+            
+
         } catch {
             // share dismissed or failed
         }
         setMenuOpen(false);
     };
+    const handleBookmark = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!userData?.id) {
+        toast.error("User not authenticated");
+        return;
+        }
+        if (bookmarkLoading) return;
 
+        setBookmarked((prev) => !prev); // optimistic
+        setBookmarkLoading(true);
+
+        try {
+        const res = await axios.post(
+            `${BACKEND_URL}/api/posts/${post._id}/bookmark`,
+            {},
+            { withCredentials: true },
+        );
+        setBookmarked(res.data.bookmarked);
+
+        if (setPost) {
+            setPost((prev) =>
+            prev ? { ...prev, isBookmarked: res.data.bookmarked } : prev,
+            );
+        } else {
+            setPosts((prev) =>
+            prev.map((p) =>
+                p._id === post._id
+                ? { ...p, isBookmarked: res.data.bookmarked }
+                : p,
+            ),
+            );
+        }
+        toast.success(res.data.bookmarked ? "Post saved" : "Removed from saved");
+        } catch (error) {
+        setBookmarked((prev) => !prev); // revert
+        if (axios.isAxiosError(error) && error.response?.status === 403) {
+            toast.error("Action blocked");
+        } else {
+            toast.error("Failed to update bookmark");
+        }
+        } finally {
+        setBookmarkLoading(false);
+        }
+    };
     return (
         <div className="content-card glass-hover relative overflow-clip cursor-pointer"
             onClick={openPost}>
@@ -410,6 +510,20 @@ Report post </button>
                             {likeCount} {likeCount === 1 ? 'Like' : 'Likes'}
                         </button>
                     </div>
+                    <div className="flex flex-col text-center sm:flex-row gap-1 items-center md:w-[20%] justify-center">
+                        <button
+                            onClick={handleBookmark}
+                            disabled={bookmarkLoading}
+                            className={`p-0 hover:text-blue-500 transition-colors duration-200 ${bookmarkLoading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                            aria-label={bookmarked ? "Remove bookmark" : "Bookmark post"}
+                        >
+                            {bookmarked
+                            ? <BookmarkCheck className="h-4.5 md:h-5 text-blue-500" fill="currentColor" />
+                            : <Bookmark className="h-4.5 md:h-5" />
+                            }
+                        </button>
+                        <span className="text-sm">{bookmarked ? "Saved" : "Save"}</span>
+                    </div>
                 </div>
 
                 <div>
@@ -436,6 +550,7 @@ Report post </button>
                 open={showLikesModal}
                 onClose={() => setShowLikesModal(false)}
                 likers={uniqueLikes}
+                postId={post._id}
             />
 
             {showEditModal && (

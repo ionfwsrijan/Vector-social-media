@@ -20,6 +20,7 @@ export type UserSummary = {
   email?: string;
   phoneNumber?: string;
   username?: string;
+  createdAt?: string;
   bio?: string;
   description?: string;
   avatar?: string;
@@ -49,6 +50,7 @@ export type Post = {
   commentsCount?: number;
   sharesCount?: number;
   createdAt: string;
+  isBookmarked?: boolean;
 };
 
 export type Comment = {
@@ -75,13 +77,15 @@ export type Message = {
   isDeleted?: boolean;
   deletedAt?: string | null;
 
+  isRead?: boolean;
+
   createdAt: string;
   conversation: string;
 };
 
 export type Notification = {
   _id: string;
-  type: "follow" | "like" | "comment" | "message" | "follow_request" | "follow_request_accepted";
+  type: "follow" | "like" | "comment" | "message" | "follow_request" | "follow_request_accepted" | "post_removed_reported" | "comment_removed_reported";
   sender: UserSummary | null;
   post?: {
     _id: string;
