@@ -98,7 +98,7 @@ export default function PostPage() {
       <div className="px-5 md:px-10">
         <PostCard post={post} setPost={setPost} />
         <div className="mt-6">
-          <CommentsSection postId={post._id} />
+          <CommentsSection postId={post._id} postAuthorId={post.author?._id} />
         </div>
       </div>
     </div>

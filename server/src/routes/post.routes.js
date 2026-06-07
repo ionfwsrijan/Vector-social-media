@@ -7,42 +7,33 @@ import {
     getSinglePost, 
     getTopPostsOfWeek,
     getTopPostsOfMonth,
-    toggleLike, 
+    likePost,
+    unlikePost,
     incrementShare,
-    updatePost
+    updatePost,toggleBookmark,
+    getBookmarks,
+    searchPosts
 } from "../controllers/post.controller.js";
 import authMiddleware from "../middlewares/auth.middleware.js";
-import upload from "../middlewares/upload.middleware.js";
-import jwt from "jsonwebtoken";
-import User from "../models/user.model.js";
-
-// Sets req.user if a valid token exists, but doesn't block the request
-const optionalAuth = async (req, res, next) => {
-  try {
-    const token = req.cookies?.token;
-    if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.id);
-      if (user) req.user = user;
-    }
-  } catch {
-    // Silently ignore — unauthenticated access is allowed
-  }
-  next();
-};
+import { uploadImage } from "../middlewares/upload.middleware.js";
+import optionalAuth from "../middlewares/optionalAuth.middleware.js";
+import { postWriteLimiter, searchLimiter, socialActionLimiter } from "../middlewares/rateLimit.middleware.js";
 
 const postRouter = express.Router();
 
-postRouter.post("/", authMiddleware, upload.single("image"), createPost);
+postRouter.post("/", authMiddleware, postWriteLimiter, uploadImage("image"), createPost);
+postRouter.get("/search", searchLimiter, optionalAuth, searchPosts);
 postRouter.get("/", optionalAuth, getPosts);
 postRouter.get("/top-week", optionalAuth, getTopPostsOfWeek);
-postRouter.get("/top-month", getTopPostsOfMonth);
-postRouter.get("/:postId", optionalAuth, getSinglePost);
-postRouter.post("/like/:id", authMiddleware, toggleLike);
-postRouter.put("/:id/like", authMiddleware, toggleLike);
-postRouter.put("/:id/share", authMiddleware, incrementShare);
-postRouter.put("/:id", authMiddleware, upload.single("image"), updatePost);
-postRouter.delete("/:id", authMiddleware, deletePost);
+postRouter.get("/top-month", optionalAuth, getTopPostsOfMonth);
+postRouter.get("/bookmarks", authMiddleware, getBookmarks); 
 postRouter.get("/user/:userId", optionalAuth, getPostsByUser);
+postRouter.get("/:postId", optionalAuth, getSinglePost);
+postRouter.post("/:id/like", authMiddleware, socialActionLimiter, likePost);
+postRouter.post("/:id/unlike", authMiddleware, socialActionLimiter, unlikePost);
+postRouter.put("/:id/share", authMiddleware, socialActionLimiter, incrementShare);
+postRouter.put("/:id", authMiddleware, postWriteLimiter, uploadImage("image"), updatePost);
+postRouter.delete("/:id", authMiddleware, postWriteLimiter, deletePost);
+postRouter.post("/:id/bookmark", authMiddleware, socialActionLimiter, toggleBookmark);
 
 export default postRouter;
