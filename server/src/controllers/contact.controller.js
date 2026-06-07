@@ -1,31 +1,28 @@
 import Contact from "../models/contact.model.js";
+import { contactSchema } from "../validators/contact.validator.js";
+import asyncHandler from "../utils/asyncHandler.js";
+const getValidationMessage = (validationResult, fallbackMessage) => {
+  const firstIssue = validationResult?.error?.issues?.[0];
+  return firstIssue?.message || fallbackMessage;
+};
 
-export const submitContact = async (req, res) => {
-  try {
-    const { name, email, subject, message } = req.body;
+export const submitContact = asyncHandler(async (req, res) => {
+    const validation = contactSchema.safeParse(req.body);
 
-    // Validate all fields are strings and not empty
-    if (
-      typeof name !== "string" ||
-      typeof email !== "string" ||
-      typeof subject !== "string" ||
-      typeof message !== "string" ||
-      !name.trim() ||
-      !email.trim() ||
-      !subject.trim() ||
-      !message.trim()
-    ) {
+    if (!validation.success) {
       return res.status(400).json({
         success: false,
-        message: "All fields are required and must be valid",
+        message: getValidationMessage(validation, "Invalid contact data"),
       });
     }
 
+    const { name, email, subject, message } = validation.data;
+
     const contact = await Contact.create({
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      subject: subject.trim(),
-      message: message.trim(),
+      name,
+      email,
+      subject,
+      message,
     });
 
     return res.status(201).json({
@@ -33,11 +30,5 @@ export const submitContact = async (req, res) => {
       message: "Message submitted successfully",
       contactId: contact._id,
     });
-  } catch (error) {
-    const message = error.name === "ValidationError" ? error.message : "Failed to submit message";
-    return res.status(400).json({
-      success: false,
-      message,
-    });
-  }
-};
+ 
+});

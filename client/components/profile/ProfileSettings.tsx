@@ -6,6 +6,7 @@ import axios from "axios";
 import { ChangeEvent, useEffect, useState, useRef } from "react";
 import { toast } from "react-toastify";
 import type { ProfileFormData } from "@/lib/types";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 type EditableMap = {
   username: boolean;
@@ -31,6 +32,7 @@ export default function ProfileSettings() {
   const { userData, setUserData } = useAppContext();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [initialData, setInitialData] =
     useState<ProfileFormData | null>(null);
@@ -50,6 +52,29 @@ export default function ProfileSettings() {
   });
 
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL!;
+
+  // --- FIX: Focus trap for the settings panel ---
+  const focusTrapRef = useFocusTrap(true);
+
+  // --- FIX: Close on Esc key ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // Reset editable fields on Esc — mirrors clicking Cancel
+        setEditable({
+          username: false,
+          name: false,
+          surname: false,
+          phoneNumber: false,
+          bio: false,
+          description: false,
+        });
+        if (initialData) setFormData(initialData);
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [initialData]);
 
   useEffect(() => {
     if (userData) {
@@ -90,12 +115,20 @@ export default function ProfileSettings() {
 
     try {
       setUploadingAvatar(true);
-      const res = await axios.post(BACKEND_URL + "/api/users/avatar", data, { withCredentials: true });
+
+      const res = await axios.post(
+        BACKEND_URL + "/api/users/avatar",
+        data,
+        { withCredentials: true }
+      );
+
       if (res.data.success) {
         setAvatar(res.data.avatar);
         setUserData(prev => prev ? { ...prev, avatar: res.data.avatar } : prev);
+
         setSelectedFile(null);
         setPreview(null);
+
         toast.success("Profile picture updated");
       }
     } catch {
@@ -129,8 +162,6 @@ export default function ProfileSettings() {
           bio: false,
           description: false,
         });
-      } else {
-        toast.warn(data.message)
       }
     } catch (err) {
       console.error(err);
@@ -139,72 +170,35 @@ export default function ProfileSettings() {
     }
   };
 
-  const handleAvatarDiscard = () => {
-    setSelectedFile(null);
-    setPreview(null);
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  };
-
-  const handleCancel = () => {
-    setFormData(initialData);
-    handleAvatarDiscard();
-    setEditable({
-      username: false,
-      name: false,
-      surname: false,
-      phoneNumber: false,
-      bio: false,
-      description: false,
-    });
-  };
-
   return (
-    <div className="page-scroll px-5 py-5 md:px-20 md:pt-5">
-      <h1 className="mb-3 text-center text-xl font-semibold text-foreground md:text-left md:text-2xl">Edit Profile</h1>
+    // --- FIX: role="dialog", aria-modal, aria-labelledby, focusTrapRef attached ---
+    <div
+      ref={focusTrapRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="profile-settings-title"
+      className="h-screen px-20 py-5 overflow-y-auto"
+    >
+      <h1 id="profile-settings-title" className="text-2xl font-semibold mb-6">Edit Profile</h1>
 
-      <div className="flex flex-col md:flex-row items-center gap-2 md:gap-6 mb-6">
-        <div className="h-22 md:h-24 w-22 md:w-24 rounded-full overflow-hidden border">
+      <div className="flex items-center gap-6 mb-6">
+        <div className="h-24 w-24 rounded-full overflow-hidden border">
           <Image alt="Profile preview" src={preview || avatar || "/avatar-placeholder.png"} width={96} height={96} unoptimized={!!preview} className="h-full w-full object-cover" />
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="cursor-pointer font-medium text-primary"
-          >
-            Change photo
-          </button>
+        <button type="button" onClick={() => fileInputRef.current?.click()} className="text-blue-600 font-medium cursor-pointer">
+          Change photo
+        </button>
 
-          {selectedFile && (
-            <>
-              <button
-                type="button"
-                disabled={uploadingAvatar}
-                onClick={handleAvatarUpload}
-                className="h-9 px-5 text-sm rounded-md bg-blue-500 hover:bg-blue-600 text-white cursor-pointer"
-              >
-                {uploadingAvatar ? "Uploading..." : "Set as profile pic"}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleAvatarDiscard}
-                className="glass-surface-strong h-9 cursor-pointer rounded-md px-5 text-sm text-foreground hover:bg-accent/70"
-              >
-                Discard
-              </button>
-            </>
-          )}
-        </div>
+        <button type="button" disabled={!selectedFile || uploadingAvatar} onClick={handleAvatarUpload} className={`px-4 py-1.5 rounded-md text-white transition ${!selectedFile || uploadingAvatar ? "bg-blue-300 cursor-not-allowed" : "bg-blue-500 hover:bg-blue-600 cursor-pointer"}`}>
+          {uploadingAvatar ? "Uploading..." : "Set as profile pic"}
+        </button>
 
         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarChange} />
       </div>
 
-      <div className="grid grid-cols-1 gap-x-10 gap-y-5 md:grid-cols-2 text-foreground">
+      {/* Fields */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-5">
         <EditableInput
           label="Username"
           name="username"
@@ -258,25 +252,11 @@ export default function ProfileSettings() {
           onEdit={() => toggleEdit("description")}
           onChange={handleChange}
         />
-
-        <div className="md:col-span-2 mt-2">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setFormData(prev => prev ? { ...prev, isPrivate: !prev.isPrivate } : prev)}>
-            <input 
-              type="checkbox" 
-              checked={formData.isPrivate} 
-              onChange={(e) => setFormData({ ...formData, isPrivate: e.target.checked })} 
-              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" 
-            />
-            <div className="flex flex-col">
-              <p className="font-medium text-foreground">Private Account</p>
-              <p className="text-xs text-muted-foreground">Only your followers will see your posts and lists.</p>
-            </div>
-          </div>
-        </div>
       </div>
 
+      {/* Actions */}
       <div className="flex justify-end gap-4 mt-7">
-        <button className="w-40 py-2 bg-blue-600 text-white cursor-pointer rounded-lg" onClick={handleCancel}>Cancel</button>
+        <button className="w-40 py-2 border cursor-pointer rounded-lg">Cancel</button>
         <button disabled={loading || !isFormChanged} onClick={handleSave} className={`w-40 py-2 text-white rounded-lg ${isFormChanged ? 'bg-blue-600 cursor-pointer' : 'cursor-not-allowed bg-blue-400'} ${loading ? 'cursor-not-allowed bg-blue-400' : ''}`}>
           {loading ? 'Saving..' : 'Save changes'}
         </button>
@@ -285,6 +265,7 @@ export default function ProfileSettings() {
   );
 }
 
+/* ---------- Reusable Inputs ---------- */
 
 function EditableInput({
   label,
@@ -297,9 +278,9 @@ function EditableInput({
   return (
     <div>
       <div className="flex justify-between mb-1">
-        <label className="font-medium text-foreground">{label}</label>
+        <label className="font-medium">{label}</label>
         {!editable && (
-          <button onClick={onEdit} className="cursor-pointer text-sm text-primary">
+          <button onClick={onEdit} className="text-blue-600 text-sm cursor-pointer">
             Edit
           </button>
         )}
@@ -309,7 +290,7 @@ function EditableInput({
         value={value}
         disabled={!editable}
         onChange={onChange}
-        className={`settings-field ${editable ? "settings-field-editable" : "settings-field-disabled"
+        className={`w-full px-3 py-2 rounded-lg border ${editable ? "border-blue-500" : "bg-gray-100 cursor-not-allowed"
           }`}
       />
     </div>
@@ -327,9 +308,9 @@ function EditableTextarea({
   return (
     <div className="md:col-span-2">
       <div className="flex justify-between mb-1">
-        <label className="font-medium text-foreground">{label}</label>
+        <label className="font-medium">{label}</label>
         {!editable && (
-          <button onClick={onEdit} className="cursor-pointer text-sm text-primary">
+          <button onClick={onEdit} className="text-blue-600 text-sm cursor-pointer">
             Edit
           </button>
         )}
@@ -340,7 +321,7 @@ function EditableTextarea({
         disabled={!editable}
         onChange={onChange}
         rows={3}
-        className={`settings-field ${editable ? "settings-field-editable" : "settings-field-disabled"
+        className={`w-full px-3 py-2 rounded-lg border ${editable ? "border-blue-500" : "bg-gray-100 cursor-not-allowed"
           }`}
       />
     </div>

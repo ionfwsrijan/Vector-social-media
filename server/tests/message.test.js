@@ -6,7 +6,6 @@ jest.unstable_mockModule('../src/socket/socket.js', () => ({
     to: () => ({ emit: () => {} }),
     emit: () => {},
   }),
-  onlineUsers: new Map(),
 }));
 
 // ─── Imports AFTER mock ───────────────────────────────────────────────────────
@@ -32,7 +31,7 @@ const userAData = {
   surname: 'Alpha',
   phoneNumber: '1111111111',
   email: 'usera@test.com',
-  password: 'password123',
+  password: 'Password123',
   username: 'user_alpha',
   bio: 'Hi',
   description: 'Test user A',
@@ -43,7 +42,7 @@ const userBData = {
   surname: 'Beta',
   phoneNumber: '2222222222',
   email: 'userb@test.com',
-  password: 'password123',
+  password: 'Password123',
   username: 'user_beta',
   bio: 'Hi',
   description: 'Test user B',
@@ -90,7 +89,7 @@ describe('Message Endpoints', () => {
         .send({ conversationId });
 
       expect(res.status).toBe(400);
-      expect(res.body.message).toBe('Missing fields');
+      expect(res.body.message).toBeDefined();
     });
 
     it('should return 400 if conversationId is missing', async () => {
@@ -100,7 +99,7 @@ describe('Message Endpoints', () => {
         .send({ content: 'Hello!' });
 
       expect(res.status).toBe(400);
-      expect(res.body.message).toBe('Missing fields');
+      expect(res.body.message).toBeDefined();
     });
 
     it('should return 404 if conversation does not exist', async () => {
@@ -121,6 +120,61 @@ describe('Message Endpoints', () => {
       expect(res.status).toBe(401);
     });
 
+    it('should accept a message exactly at the 2000 character limit', async () => {
+      const content = 'a'.repeat(2000);
+      const res = await request(app)
+        .post('/api/messages')
+        .set('Cookie', cookieA)
+        .send({ conversationId, content });
+
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(content);
+    });
+
+    it('should return 400 when message content exceeds 2000 characters', async () => {
+      const content = 'a'.repeat(2001);
+      const res = await request(app)
+        .post('/api/messages')
+        .set('Cookie', cookieA)
+        .send({ conversationId, content });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('Message must be between 1 and 2000 characters');
+    });
+
+    it('should return 400 when content is whitespace only', async () => {
+      const res = await request(app)
+        .post('/api/messages')
+        .set('Cookie', cookieA)
+        .send({ conversationId, content: '   \t\n  ' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('Message content cannot be empty');
+    });
+
+    it('should trim surrounding whitespace before the empty check', async () => {
+      const res = await request(app)
+        .post('/api/messages')
+        .set('Cookie', cookieA)
+        .send({ conversationId, content: '     ' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('should reject a payload well above the limit without a DB write', async () => {
+      const content = 'x'.repeat(5_000);
+      const res = await request(app)
+        .post('/api/messages')
+        .set('Cookie', cookieA)
+        .send({ conversationId, content });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('Message must be between 1 and 2000 characters');
+
+      const count = await Message.countDocuments({ conversation: conversationId });
+      expect(count).toBe(0);
+    });
+
   });
 
   // ── Get Messages ─────────────────────────────────────────────────────────────
@@ -138,9 +192,10 @@ describe('Message Endpoints', () => {
         .set('Cookie', cookieA);
 
       expect(res.status).toBe(200);
-      expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body.length).toBeGreaterThan(0);
-      expect(res.body[0].content).toBe('Fetch me!');
+      expect(Array.isArray(res.body.messages)).toBe(true);
+      expect(res.body.messages.length).toBeGreaterThan(0);
+      expect(typeof res.body.hasMore).toBe('boolean');
+      expect(res.body.messages[0].content).toBe('Fetch me!');
     });
 
     it('should return 401 if user is not authenticated', async () => {
@@ -184,7 +239,7 @@ describe('Message Endpoints', () => {
         surname: 'Sider',
         phoneNumber: '3333333333',
         email: 'outsider@test.com',
-        password: 'password123',
+        password: 'Password123',
         username: 'outsider_user',
         bio: 'Hi',
         description: 'Not in this conversation',

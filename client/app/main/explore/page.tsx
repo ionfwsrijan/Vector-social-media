@@ -9,18 +9,33 @@ import {
   LayoutGrid,
   Search,
   TrendingUp,
+  UserPlus,
+  UserCheck,
+  Users,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "react-toastify";
 import InlineLoader from "@/components/loaders/InlineLoader";
 import type { Intent } from "@/lib/types";
+import { getErrorMessage } from "@/lib/error";
+import SearchBar from "@/components/SearchBar";
 
 type User = {
   _id: string;
   name: string;
   username?: string;
   avatar?: string;
+};
+
+type SuggestedUser = {
+  _id: string;
+  name: string;
+  username?: string;
+  avatar?: string;
+  bio?: string;
+  isFollowedByCurrentUser: boolean;
+  isRequestedByCurrentUser: boolean;
 };
 
 type SearchPost = {
@@ -74,7 +89,12 @@ export default function Explore() {
   const [results, setResults] = useState<User[]>([]);
   const [postResults, setPostResults] = useState<SearchPost[]>([]);
   const [searching, setSearching] = useState(false);
+  const [isDebouncing, setIsDebouncing] = useState(false);
   const [open, setOpen] = useState(false);
+  const [suggestedUsers, setSuggestedUsers] = useState<SuggestedUser[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(true);
+  const [showAllSuggestions, setShowAllSuggestions] = useState(false);
+  const [followingState, setFollowingState] = useState<Record<string, "follow" | "requested" | "following">>({});
   const router = useRouter();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -125,14 +145,7 @@ export default function Explore() {
 
         setTopPosts(data.posts || []);
       } catch (error: unknown) {
-        if (axios.isAxiosError(error)) {
-          toast.error(
-            error.response?.data?.message ||
-              "Failed to load explore data"
-          );
-        } else {
-          toast.error("Failed to load explore data");
-        }
+        toast.error(getErrorMessage(error, "Failed to load explore data"));
       } finally {
         setLoading(false);
       }
@@ -144,14 +157,72 @@ export default function Explore() {
   }, [BACKEND_URL]);
 
   useEffect(() => {
-    const delay = setTimeout(async () => {
-      if (!query.trim()) {
-        setResults([]);
-        setPostResults([]);
-        setOpen(false);
-        return;
+    const fetchSuggestedUsers = async () => {
+      try {
+        const { data } = await axios.get(
+          `${BACKEND_URL}/api/users/suggestions`,
+          { withCredentials: true }
+        );
+        const users: SuggestedUser[] = data.users || [];
+        setSuggestedUsers(users);
+        const initialState: Record<string, "follow" | "requested" | "following"> = {};
+        users.forEach((u) => {
+          if (u.isFollowedByCurrentUser) initialState[u._id] = "following";
+          else if (u.isRequestedByCurrentUser) initialState[u._id] = "requested";
+          else initialState[u._id] = "follow";
+        });
+        setFollowingState(initialState);
+      } catch {
+        // suggestions are non-critical, fail silently
+      } finally {
+        setSuggestionsLoading(false);
       }
+    };
 
+    if (BACKEND_URL) {
+      fetchSuggestedUsers();
+    }
+  }, [BACKEND_URL]);
+
+  const handleToggleFollow = async (userId: string) => {
+    try {
+      const res = await axios.put(
+        `${BACKEND_URL}/api/users/${userId}/follow`,
+        {},
+        { withCredentials: true }
+      );
+
+      setFollowingState((prev) => {
+        if (res.data.requested !== undefined) {
+          return {
+            ...prev,
+            [userId]: res.data.requested ? "requested" : "follow",
+          };
+        }
+        return {
+          ...prev,
+          [userId]: res.data.followed ? "following" : "follow",
+        };
+      });
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, "Failed to update follow status"));
+    }
+  };
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults([]);
+      setPostResults([]);
+      setOpen(false);
+      setIsDebouncing(false);
+      return;
+    }
+
+    setOpen(true);
+    setIsDebouncing(true);
+
+    const delay = setTimeout(async () => {
+      setIsDebouncing(false);
       try {
         setSearching(true);
         const res = await axios.get(
@@ -163,7 +234,6 @@ export default function Explore() {
 
         setResults(res.data.users || []);
         setPostResults(res.data.posts || []);
-        setOpen(true);
       } catch (err) {
         console.error("Search failed:", err);
       } finally {
@@ -193,6 +263,10 @@ export default function Explore() {
       document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  const displayedUsers = showAllSuggestions
+  ? suggestedUsers
+  : suggestedUsers.slice(0, 4);
+
   return (
     <div className="w-full min-w-0 overflow-x-hidden py-5 px-4 sm:px-7">
       <div className="space-y-8">
@@ -216,27 +290,21 @@ export default function Explore() {
               Search
             </h2>
             <div className="relative min-w-0" ref={wrapperRef}>
-                <div className="search-pill flex min-h-11 items-center gap-2 px-3 py-1">
-                  <Search
-                    className="h-5 shrink-0 text-muted-foreground"
-                    aria-hidden
-                  />
-                  <input
-                    type="text"
-                    placeholder="Search users and posts"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="min-h-10 min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
-                  />
-                </div>
+                <SearchBar
+                  placeholder="Search users and posts"
+                  value={query}
+                  onChange={setQuery}
+                  className="flex min-h-11 items-center gap-2 px-3 py-1"
+                  inputClassName="min-h-10 min-w-0 flex-1 py-2 text-sm outline-none"
+                />
 
                 {open && (
                   <div className="absolute z-50 mt-2 max-h-75 w-full min-w-0 max-w-full overflow-y-auto rounded-xl border border-border bg-card shadow-lg">
-                    {searching ? (
-                      <p className="p-4 text-sm text-muted-foreground">
-                        Searching...
-                      </p>
-                    ) : results.length === 0 ? (
+                    {isDebouncing || searching ? (
+                      <div className="p-4">
+                        <InlineLoader text="Searching..." />
+                      </div>
+                    ) : results.length === 0 && postResults.length === 0? (
                       <div className="p-4 text-center">
                         <p className="text-sm font-medium text-foreground">
                           No users found for &quot;{query}&quot;
@@ -328,6 +396,108 @@ export default function Explore() {
             </section>
 
             <section
+              className="panel-card space-y-4"
+              aria-labelledby="explore-suggestions-heading"
+            >
+              <h2
+                id="explore-suggestions-heading"
+                className="flex items-center gap-2 font-semibold text-foreground"
+              >
+                <Users className="h-5 shrink-0 text-blue-400" aria-hidden />
+                People you might know
+              </h2>
+
+              {suggestionsLoading ? (
+                <p className="text-sm text-muted-foreground">Loading suggestions...</p>
+              ) : suggestedUsers.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No suggestions right now</p>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {displayedUsers.map((user) => {
+                    const state = followingState[user._id] ?? "follow";
+
+                    
+
+                    return (
+                      <div
+                        key={user._id}
+                        className={`${exploreCard} flex items-center gap-3 p-3`}
+                      >
+                        <div
+                          className="h-10 w-10 shrink-0 cursor-pointer overflow-hidden rounded-full bg-muted"
+                          onClick={() => user.username && router.push(`/main/user/${user.username}`)}
+                        >
+                          <Image
+                            src={user.avatar || "/default-avatar.png"}
+                            alt={user.name}
+                            width={40}
+                            height={40}
+                            className="h-full w-full object-cover"
+                          />
+                        </div>
+
+                        <div
+                          className="min-w-0 flex-1 cursor-pointer"
+                          onClick={() => user.username && router.push(`/main/user/${user.username}`)}
+                        >
+                          <p className="truncate text-sm font-medium text-foreground">
+                            {user.name}
+                          </p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            @{user.username || "unknown"}
+                          </p>
+                          {user.bio && (
+                            <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
+                              {user.bio}
+                            </p>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleToggleFollow(user._id)}
+                          className={`flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-3 py-1 text-xs font-medium transition-colors duration-200 ${
+                            state === "following"
+                              ? "border-border bg-accent text-foreground hover:bg-accent/70"
+                              : state === "requested"
+                              ? "border-border bg-accent text-muted-foreground hover:bg-accent/70"
+                              : "border-blue-500 bg-blue-500 text-white hover:bg-blue-600"
+                          }`}
+                        >
+                          {state === "following" ? (
+                            <>
+                              <UserCheck className="h-3 w-3" aria-hidden />
+                              Following
+                            </>
+                          ) : state === "requested" ? (
+                            <>
+                              <UserCheck className="h-3 w-3" aria-hidden />
+                              Requested
+                            </>
+                          ) : (
+                            <>
+                              <UserPlus className="h-3 w-3" aria-hidden />
+                              Follow
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {suggestedUsers.length > 4 && !showAllSuggestions && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllSuggestions(true)}
+                  className="w-full rounded-lg border border-border py-2 text-sm font-medium hover:bg-accent/50"
+                >
+                  Show More
+                </button>
+              )}
+            </section>
+
+            <section
               className="panel-card space-y-3"
               aria-labelledby="explore-intents-heading"
             >
@@ -376,7 +546,7 @@ export default function Explore() {
                   {topicCards.map((topic) => (
                     <div
                       key={topic.intent}
-                      className={`${exploreGridCard} relative min-h-[10rem] overflow-hidden`}
+                      className={`${exploreGridCard} relative min-h-40 overflow-hidden`}
                     >
                       <p className="absolute bottom-0 left-0 z-20 flex w-full items-center justify-between bg-black/40 p-2 text-sm text-white">
                         <span className="flex min-w-0 items-center gap-2">
@@ -390,7 +560,7 @@ export default function Explore() {
                         alt={topic.label}
                         width={400}
                         height={240}
-                        className="h-full min-h-[10rem] w-full object-cover"
+                        className="h-full min-h-40 w-full object-cover"
                       />
                     </div>
                   ))}

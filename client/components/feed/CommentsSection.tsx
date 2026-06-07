@@ -2,11 +2,12 @@
 
 import axios from "axios";
 import Image from "next/image";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useAppContext } from "@/context/AppContext";
 import { useRouter } from "next/navigation";
 import { toast } from "react-toastify";
-import { Flag, MoreHorizontal, Trash2 } from "lucide-react";
+import { getErrorMessage } from "@/lib/error";
+import { Flag, MoreHorizontal, Trash2, AlertCircle } from "lucide-react";
 import DeleteWarning from "@/components/modals/DeleteWarning";
 import InlineLoader from "../loaders/InlineLoader";
 import type { Comment } from "@/lib/types";
@@ -16,18 +17,23 @@ import { reportComment } from "@/lib/reportApi";
 import Linkify from "../ui/Linkify";
 
 
-export default function CommentsSection({ postId }: { postId: string }) {
+export default function CommentsSection({ postId, postAuthorId }: { postId: string; postAuthorId?: string }) {
     const { userData } = useAppContext();
     const [comments, setComments] = useState<Comment[]>([]);
     const [text, setText] = useState("");
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const router = useRouter();
     const [buttonLoading, setButtonLoading] = useState(false);
+    const [loadMoreLoading, setLoadMoreLoading] = useState(false);
+    const [loadMoreError, setLoadMoreError] = useState(false);
     const [showDeleteModal, setShowDeleteModal] = useState(false);
     const [showReportModal, setShowReportModal] = useState(false);
     const [selectedComment, setSelectedComment] = useState<Comment | null>(null);
     const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
-    const [visibleCount, setVisibleCount] = useState(5);
+    const [cursor, setCursor] = useState<string | null>(null);
+    const [hasMore, setHasMore] = useState(true);
+    const LIMIT = 20;
 
     function timeAgo(dateString: string) {
         const now = new Date().getTime();
@@ -46,27 +52,51 @@ export default function CommentsSection({ postId }: { postId: string }) {
 
     const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL!;
 
-    useEffect(() => {
-        const fetchComments = async () => {
-            const { data } = await axios.get(`${BACKEND_URL}/api/comments/${postId}`, { withCredentials: true });
-            setComments(data);
+    const fetchComments = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const { data } = await axios.get(`${BACKEND_URL}/api/comments/${postId}?limit=${LIMIT}`, { withCredentials: true });
+            setComments(data.comments);
+            setHasMore(data.hasMore);
+            setCursor(data.nextCursor);
+        } catch (err: unknown) {
+            console.error("Error fetching comments:", err);
+            setError(getErrorMessage(err, "Failed to load comments."));
+        } finally {
             setLoading(false);
-        };
-        fetchComments();
+        }
     }, [BACKEND_URL, postId]);
+
+    useEffect(() => {
+        fetchComments();
+    }, [fetchComments]);
+
+    const loadMoreComments = async () => {
+        setLoadMoreLoading(true);
+        setLoadMoreError(false);
+        try {
+            const { data } = await axios.get(`${BACKEND_URL}/api/comments/${postId}?cursor=${cursor}&limit=${LIMIT}`, { withCredentials: true });
+            setComments(prev => [...prev, ...data.comments]);
+            setHasMore(data.hasMore);
+            setCursor(data.nextCursor);
+        } catch (err: unknown) {
+            console.error("Error loading more comments:", err);
+            setLoadMoreError(true);
+            toast.error(getErrorMessage(err, "Failed to load more comments."));
+        } finally {
+            setLoadMoreLoading(false);
+        }
+    };
 
     const handlePost = async () => {
         try {
             setButtonLoading(true);
             const { data } = await axios.post(`${BACKEND_URL}/api/comments/${postId}`, { content: text }, { withCredentials: true });
-            setComments(prev => [...prev, data]);
+            setComments(prev => [data, ...prev]);
             setText("");
         } catch (error: unknown) {
-            if (error instanceof Error) {
-                toast.error(error.message);
-            } else {
-                toast.error("Failed to post comment");
-            }
+            toast.error(getErrorMessage(error, "Failed to post comment"));
         } finally {
             setButtonLoading(false);
         }
@@ -88,11 +118,7 @@ export default function CommentsSection({ postId }: { postId: string }) {
             setComments(prev => prev.filter(c => c._id !== selectedComment._id));
             toast.success("Comment deleted");
         } catch (error: unknown) {
-            if (error instanceof Error) {
-                toast.error(error.message);
-            } else {
-                toast.error("Failed to delete comment");
-            }
+            toast.error(getErrorMessage(error, "Failed to delete comment"));
         } finally {
             setShowDeleteModal(false);
             setSelectedComment(null);
@@ -107,6 +133,23 @@ export default function CommentsSection({ postId }: { postId: string }) {
 
     if (loading) {
         return <div className="py-2"><InlineLoader text="Loading comments..." /></div>;
+    }
+
+    if (error) {
+        return (
+            <div className="mt-3 flex flex-col items-center justify-center rounded-xl border border-dashed border-red-500/30 bg-red-500/5 py-8 px-4 text-center">
+                <AlertCircle className="mb-2 h-10 w-10 text-red-500 opacity-80" />
+                <p className="text-[0.9rem] font-medium text-red-500 mb-4">
+                    {error}
+                </p>
+                <button
+                    onClick={fetchComments}
+                    className="cursor-pointer px-4 py-2 bg-blue-500 hover:bg-blue-600 active:scale-95 transition-all text-white text-xs font-semibold rounded-md shadow-md hover:shadow-lg"
+                >
+                    Retry loading comments
+                </button>
+            </div>
+        );
     }
 
     return (
@@ -129,13 +172,16 @@ export default function CommentsSection({ postId }: { postId: string }) {
                     </p>
                 )}
 
-                {comments.slice(0, visibleCount).map((c) => {
-                    const isOwner =
-                        String(c.author?._id) === String(userData?.id);
+                {comments.map((c) => {
+                    const isCommentAuthor =
+                        String(c.author?._id) === String(userData?._id);
+                    const isPostAuthor =
+                        postAuthorId && String(postAuthorId) === String(userData?._id);
+                    const canDelete = isCommentAuthor || isPostAuthor;
 
                     return (
                         <div key={c._id} className="flex gap-3 py-3 px-2 rounded-lg border-b border-border/50 last:border-b-0">
-                            <Image alt={c.author?.name || "Comment author"} src={c.author?.avatar || "/default-avatar.png"} width={36} height={36} className="h-8 w-8 md:h-9 md:w-9 object-cover rounded-full shrink-0"/>
+                            <Image alt={c.author?.name || "Comment author"} src={c.author?.avatar || "/default-avatar.png"} width={36} height={36} className="h-8 w-8 md:h-9 md:w-9 object-cover rounded-full shrink-0" />
 
                             <div className="flex flex-col w-full">
 
@@ -162,7 +208,7 @@ export default function CommentsSection({ postId }: { postId: string }) {
 
                                         {menuOpenId === c._id && (
                                             <div className="absolute right-0 top-6 z-20 w-36 overflow-hidden rounded-md border border-black/10 bg-white shadow-lg dark:border-white/10 dark:bg-blue-950">
-                                                {!isOwner && (
+                                                {!isCommentAuthor && (
                                                     <button
                                                         type="button"
                                                         className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-black/3 dark:hover:bg-white/5"
@@ -177,7 +223,7 @@ export default function CommentsSection({ postId }: { postId: string }) {
                                                     </button>
                                                 )}
 
-                                                {isOwner && (
+                                                {canDelete && (
                                                     <button
                                                         type="button"
                                                         className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-black/3 dark:hover:bg-white/5"
@@ -196,7 +242,7 @@ export default function CommentsSection({ postId }: { postId: string }) {
                                     </div>
                                 </div>
 
-                                <div className="surface-text-muted text-[0.9rem] whitespace-pre-wrap break-words">
+                                <div className="surface-text-muted text-[0.9rem] whitespace-pre-wrap wrap-break-word">
                                     <Linkify text={c?.content || ""} />
                                 </div>
 
@@ -209,13 +255,29 @@ export default function CommentsSection({ postId }: { postId: string }) {
                     );
                 })}
 
-                {comments.length > visibleCount && (
-                    <button
-                        onClick={() => setVisibleCount(prev => prev + 5)}
-                        className="mt-3 w-full text-sm text-blue-500 hover:text-blue-600 font-medium transition"
-                    >
-                        Load more comments ({comments.length - visibleCount} remaining)
-                    </button>
+                {hasMore && (
+                    <div className="mt-3 text-center">
+                        {loadMoreLoading ? (
+                            <InlineLoader text="Loading more comments..." />
+                        ) : loadMoreError ? (
+                            <div className="flex flex-col items-center gap-1.5 py-2">
+                                <p className="text-sm text-red-500 font-medium">Failed to load more comments.</p>
+                                <button
+                                    onClick={loadMoreComments}
+                                    className="cursor-pointer text-xs text-blue-500 hover:underline font-semibold"
+                                >
+                                    Retry
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                onClick={loadMoreComments}
+                                className="w-full py-2 text-sm text-blue-500 hover:text-blue-600 hover:bg-black/3 dark:hover:bg-white/5 rounded-md font-medium transition cursor-pointer"
+                            >
+                                Load more comments
+                            </button>
+                        )}
+                    </div>
                 )}
             </div>
 

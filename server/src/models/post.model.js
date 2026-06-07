@@ -7,6 +7,11 @@ const postSchema = new mongoose.Schema({
     required: true
   },
 
+  authorIsPrivate: {
+    type: Boolean,
+    default: false
+  },
+
   content: {
     type: String,
     maxlength: 1000
@@ -41,6 +46,19 @@ const postSchema = new mongoose.Schema({
     default: 0,
   },
 
+  sharedBy: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User"
+  }],
+
 }, { timestamps: true });
+
+postSchema.index({ content: "text", intent: "text" });
+
+postSchema.pre("save", function () {
+  if (typeof this.content === "string") {
+    this.content = this.content.trim();
+  }
+});
 
 export default mongoose.model("Post", postSchema);

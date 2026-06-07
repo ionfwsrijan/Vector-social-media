@@ -1,8 +1,18 @@
-import request from 'supertest';
-import app from '../src/app.js';
-import User from '../src/models/user.model.js';
-import Notification from '../src/models/notification.model.js';
-import jwt from 'jsonwebtoken';
+import { jest } from '@jest/globals';
+
+jest.unstable_mockModule('../src/socket/socket.js', () => ({
+  getIO: () => ({
+    to: () => ({ emit: () => {} }),
+    emit: () => {},
+  }),
+}));
+
+const { default: request } = await import('supertest');
+const { default: app } = await import('../src/app.js');
+const { default: User } = await import('../src/models/user.model.js');
+const { default: Follow } = await import('../src/models/follow.model.js');
+const { default: Notification } = await import('../src/models/notification.model.js');
+const { default: jwt } = await import('jsonwebtoken');
 
 describe('User Follow Request Flows', () => {
   let user1, user2, user3;
@@ -14,7 +24,7 @@ describe('User Follow Request Flows', () => {
       name: "User One",
       username: "userone",
       email: "userone@example.com",
-      password: "password123",
+      password: "Password123",
       isPrivate: false
     });
 
@@ -22,7 +32,7 @@ describe('User Follow Request Flows', () => {
       name: "User Two",
       username: "usertwo",
       email: "usertwo@example.com",
-      password: "password123",
+      password: "Password123",
       isPrivate: true
     });
 
@@ -30,7 +40,7 @@ describe('User Follow Request Flows', () => {
       name: "User Three",
       username: "userthree",
       email: "userthree@example.com",
-      password: "password123",
+      password: "Password123",
       isPrivate: false
     });
 
@@ -47,13 +57,15 @@ describe('User Follow Request Flows', () => {
       expect(response.status).toBe(200);
       expect(response.body.followed).toBe(true);
 
-      // Verify db changes
+      // Verify Follow collection
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user3._id });
+      expect(followDoc).not.toBeNull();
+      expect(followDoc.status).toBe('accepted');
+
+      // Verify denormalised counts
       const updatedUser1 = await User.findById(user1._id);
       const updatedUser3 = await User.findById(user3._id);
-
-      expect(updatedUser1.following.map(id => id.toString())).toContain(user3._id.toString());
       expect(updatedUser1.followingCount).toBe(1);
-      expect(updatedUser3.followers.map(id => id.toString())).toContain(user1._id.toString());
       expect(updatedUser3.followersCount).toBe(1);
 
       // Verify notification
@@ -66,9 +78,10 @@ describe('User Follow Request Flows', () => {
     });
 
     it('should unfollow an already followed public account', async () => {
-      // Setup: user1 follows user3
-      await User.findByIdAndUpdate(user1._id, { $addToSet: { following: user3._id }, $inc: { followingCount: 1 } });
-      await User.findByIdAndUpdate(user3._id, { $addToSet: { followers: user1._id }, $inc: { followersCount: 1 } });
+      // Setup: seed Follow collection instead of user arrays
+      await Follow.create({ follower: user1._id, following: user3._id, status: 'accepted' });
+      await User.findByIdAndUpdate(user1._id, { $inc: { followingCount: 1 } });
+      await User.findByIdAndUpdate(user3._id, { $inc: { followersCount: 1 } });
 
       const response = await request(app)
         .put(`/api/users/${user3._id}/follow`)
@@ -77,13 +90,14 @@ describe('User Follow Request Flows', () => {
       expect(response.status).toBe(200);
       expect(response.body.followed).toBe(false);
 
-      // Verify db changes
+      // Verify Follow document is removed
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user3._id });
+      expect(followDoc).toBeNull();
+
+      // Verify counts decremented
       const updatedUser1 = await User.findById(user1._id);
       const updatedUser3 = await User.findById(user3._id);
-
-      expect(updatedUser1.following.map(id => id.toString())).not.toContain(user3._id.toString());
       expect(updatedUser1.followingCount).toBe(0);
-      expect(updatedUser3.followers.map(id => id.toString())).not.toContain(user1._id.toString());
       expect(updatedUser3.followersCount).toBe(0);
     });
 
@@ -96,9 +110,10 @@ describe('User Follow Request Flows', () => {
       expect(response.body.requested).toBe(true);
       expect(response.body.message).toBe("Follow request sent");
 
-      // Verify db changes
-      const updatedUser2 = await User.findById(user2._id);
-      expect(updatedUser2.followRequests.map(id => id.toString())).toContain(user1._id.toString());
+      // Verify pending Follow document
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user2._id });
+      expect(followDoc).not.toBeNull();
+      expect(followDoc.status).toBe('pending');
 
       // Verify notification
       const notification = await Notification.findOne({
@@ -110,8 +125,8 @@ describe('User Follow Request Flows', () => {
     });
 
     it('should cancel a pending follow request for a private account if already requested and delete notification', async () => {
-      // Setup: follow request sent and notification created
-      await User.findByIdAndUpdate(user2._id, { $addToSet: { followRequests: user1._id } });
+      // Setup: seed pending Follow document and notification
+      await Follow.create({ follower: user1._id, following: user2._id, status: 'pending' });
       await Notification.create({
         recipient: user2._id,
         sender: user1._id,
@@ -126,9 +141,9 @@ describe('User Follow Request Flows', () => {
       expect(response.body.requested).toBe(false);
       expect(response.body.message).toBe("Follow request cancelled");
 
-      // Verify db changes
-      const updatedUser2 = await User.findById(user2._id);
-      expect(updatedUser2.followRequests.map(id => id.toString())).not.toContain(user1._id.toString());
+      // Verify Follow document is removed
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user2._id });
+      expect(followDoc).toBeNull();
 
       // Verify notification deleted
       const notification = await Notification.findOne({
@@ -163,8 +178,9 @@ describe('User Follow Request Flows', () => {
 
   describe('GET /api/users/follow-requests', () => {
     it('should retrieve pending follow requests for the authenticated user', async () => {
-      // User1 and User3 request to follow User2
-      await User.findByIdAndUpdate(user2._id, { $addToSet: { followRequests: [user1._id, user3._id] } });
+      // Seed Follow collection with pending requests
+      await Follow.create({ follower: user1._id, following: user2._id, status: 'pending' });
+      await Follow.create({ follower: user3._id, following: user2._id, status: 'pending' });
 
       const response = await request(app)
         .get('/api/users/follow-requests')
@@ -172,7 +188,7 @@ describe('User Follow Request Flows', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.length).toBe(2);
-      
+
       const usernames = response.body.map(u => u.username);
       expect(usernames).toContain('userone');
       expect(usernames).toContain('userthree');
@@ -184,8 +200,8 @@ describe('User Follow Request Flows', () => {
 
   describe('GET /api/users/follow-requests/sent', () => {
     it('should retrieve sent follow requests from the authenticated user', async () => {
-      // User1 sent follow request to User2
-      await User.findByIdAndUpdate(user2._id, { $addToSet: { followRequests: user1._id } });
+      // Seed Follow collection with a pending request from user1 to user2
+      await Follow.create({ follower: user1._id, following: user2._id, status: 'pending' });
 
       const response = await request(app)
         .get('/api/users/follow-requests/sent')
@@ -201,8 +217,8 @@ describe('User Follow Request Flows', () => {
 
   describe('PUT /api/users/:id/accept-request', () => {
     it('should accept a pending follow request, update counts, and create accept notification', async () => {
-      // Setup: User1 requested User2
-      await User.findByIdAndUpdate(user2._id, { $addToSet: { followRequests: user1._id } });
+      // Setup: seed pending Follow document
+      await Follow.create({ follower: user1._id, following: user2._id, status: 'pending' });
 
       const response = await request(app)
         .put(`/api/users/${user1._id}/accept-request`)
@@ -212,15 +228,15 @@ describe('User Follow Request Flows', () => {
       expect(response.body.success).toBe(true);
       expect(response.body.message).toBe("Follow request accepted");
 
-      // Verify db changes
+      // Verify Follow document is now accepted
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user2._id });
+      expect(followDoc).not.toBeNull();
+      expect(followDoc.status).toBe('accepted');
+
+      // Verify counts
       const updatedUser1 = await User.findById(user1._id);
       const updatedUser2 = await User.findById(user2._id);
-
-      expect(updatedUser2.followRequests.map(id => id.toString())).not.toContain(user1._id.toString());
-      expect(updatedUser2.followers.map(id => id.toString())).toContain(user1._id.toString());
       expect(updatedUser2.followersCount).toBe(1);
-
-      expect(updatedUser1.following.map(id => id.toString())).toContain(user2._id.toString());
       expect(updatedUser1.followingCount).toBe(1);
 
       // Verify notification
@@ -230,6 +246,34 @@ describe('User Follow Request Flows', () => {
         type: "follow_request_accepted"
       });
       expect(notification).not.toBeNull();
+    });
+
+    it('should be concurrency-safe: only one accept succeeds and counters/notifications do not duplicate', async () => {
+      await Follow.create({ follower: user1._id, following: user2._id, status: 'pending' });
+
+      const [r1, r2] = await Promise.all([
+        request(app).put(`/api/users/${user1._id}/accept-request`).set('Cookie', `token=${token2}`),
+        request(app).put(`/api/users/${user1._id}/accept-request`).set('Cookie', `token=${token2}`),
+      ]);
+
+      const statuses = [r1.status, r2.status].sort((a, b) => a - b);
+      expect(statuses).toEqual([200, 400]);
+
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user2._id });
+      expect(followDoc).not.toBeNull();
+      expect(followDoc.status).toBe('accepted');
+
+      const updatedUser1 = await User.findById(user1._id);
+      const updatedUser2 = await User.findById(user2._id);
+      expect(updatedUser2.followersCount).toBe(1);
+      expect(updatedUser1.followingCount).toBe(1);
+
+      const notifications = await Notification.find({
+        recipient: user1._id,
+        sender: user2._id,
+        type: "follow_request_accepted",
+      });
+      expect(notifications).toHaveLength(1);
     });
 
     it('should return 400 if there is no pending request from the user', async () => {
@@ -244,8 +288,8 @@ describe('User Follow Request Flows', () => {
 
   describe('PUT /api/users/:id/reject-request', () => {
     it('should reject a pending follow request and update the database', async () => {
-      // Setup: User1 requested User2
-      await User.findByIdAndUpdate(user2._id, { $addToSet: { followRequests: user1._id } });
+      // Setup: seed pending Follow document
+      await Follow.create({ follower: user1._id, following: user2._id, status: 'pending' });
 
       const response = await request(app)
         .put(`/api/users/${user1._id}/reject-request`)
@@ -255,10 +299,12 @@ describe('User Follow Request Flows', () => {
       expect(response.body.success).toBe(true);
       expect(response.body.message).toBe("Follow request rejected");
 
-      // Verify db changes
+      // Verify Follow document is deleted
+      const followDoc = await Follow.findOne({ follower: user1._id, following: user2._id });
+      expect(followDoc).toBeNull();
+
+      // Verify counts unchanged
       const updatedUser2 = await User.findById(user2._id);
-      expect(updatedUser2.followRequests.map(id => id.toString())).not.toContain(user1._id.toString());
-      expect(updatedUser2.followers.map(id => id.toString())).not.toContain(user1._id.toString());
       expect(updatedUser2.followersCount).toBe(0);
     });
 

@@ -89,13 +89,16 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false, // Default is Public
     },
-    
+
     resetToken: String,
     resetTokenExpiry: Date,
 
-    followers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-    following: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-    followRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
+
+
     blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
     followersCount: { type: Number, default: 0 },
@@ -105,11 +108,14 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    bookmarks: [{ type: mongoose.Schema.Types.ObjectId, ref: "Post" }],
   },
   {
     timestamps: true,
   }
 );
+
+userSchema.index({ name: "text", username: "text" });
 
 const User = mongoose.model("User", userSchema);
 

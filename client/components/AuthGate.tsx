@@ -3,7 +3,7 @@
 import { useAppContext } from "@/context/AppContext";
 
 export default function AuthGate({ children }: { children: React.ReactNode }) {
-  const { loading } = useAppContext();
+  const { loading, isLoggedIn } = useAppContext();
 
   if (loading) {
     return (
@@ -11,6 +11,10 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
         Loading...
       </div>
     );
+  }
+
+  if (!isLoggedIn) {
+    return null;
   }
 
   return <>{children}</>;

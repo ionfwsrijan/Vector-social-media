@@ -32,7 +32,7 @@ export default function EditPostModal({
 
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL!;
   const MAX_CHARS = 1000;
-  const charsLeft = MAX_CHARS - content.length;
+  const charsLeft = MAX_CHARS - content.trim().length;
 
   const handleClose = () => {
     setVisible(false);
@@ -111,6 +111,7 @@ export default function EditPostModal({
       />
 
       <div
+        onClick={(e) => e.stopPropagation()}
         className={cn(
           "fixed z-60 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto",
           "glass-surface-strong rounded-3xl shadow-2xl p-0 max-h-[90vh] flex flex-col transition-all duration-300 ease-out border-t border-white/20",
